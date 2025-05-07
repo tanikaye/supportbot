@@ -40,6 +40,7 @@ app = FastAPI()
 class ChatRequest(BaseModel):
     message: str  # incoming message from frontend
     business_id: int
+    similarity_threshold: float = 0.80
 
 @app.get("/")
 def read_root():
@@ -56,12 +57,11 @@ def get_db():
 @app.post("/chat")
 def chat(request: ChatRequest, db: Session = Depends(get_db)):
     user_message = request.message
+    threshold = request.similarity_threshold
     user_embedding = get_embedding(user_message)
 
-    # Load all FAQs for the business
     faqs = db.query(FAQEntry).filter(FAQEntry.business_id == request.business_id).all()
 
-    # Find the most similar FAQ answer
     best_faq = None
     best_score = -1
 
@@ -74,13 +74,15 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
             best_score = score
             best_faq = faq
 
-    # Build prompt based on similarity
-    if best_score > 0.80:  # if similarity is high enough, include the matched FAQ
+    if best_score >= threshold:
         system_prompt = f"You are a support assistant. Use this business FAQ to help answer questions:\n\nQ: {best_faq.question}\nA: {best_faq.answer}"
+        matched_question = best_faq.question
+        matched_answer = best_faq.answer
     else:
-        system_prompt = "You are a general helpful support assistant. Answer based on your best judgment."
+        system_prompt = "You are a support assistant. The user asked something, but no relevant FAQ was found. Respond helpfully but briefly."
+        matched_question = best_faq.question if best_faq else None
+        matched_answer = None
 
-    # Call GPT
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
@@ -92,11 +94,13 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         reply = response.choices[0].message["content"]
         return {
             "reply": reply,
-            "matched_faq": best_faq.question if best_faq else None,
-            "score": best_score
+            "matched_faq": matched_question,
+            "score": best_score,
+            "used_faq": bool(score > threshold)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # === Onboard new business and store FAQ entries ===
